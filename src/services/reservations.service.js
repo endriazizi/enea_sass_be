@@ -6,7 +6,11 @@ const { query } = require('../db');
 const logger = require('../logger');
 const env = require('../env');
 
-// --- Helpers data ------------------------------------------------------------
+// --- Helpers base ------------------------------------------------------------
+function trimOrNull(s) {
+  const v = (s ?? '').toString().trim();
+  return v ? v : null;
+}
 
 // Normalizza YYYY-MM-DD → 'YYYY-MM-DD 00:00:00' e 'YYYY-MM-DD 23:59:59'
 function toDayRange(fromYmd, toYmd) {
@@ -30,6 +34,38 @@ function computeEndAtFromStart(startAtIso) {
   return { startMysql: mysqlStart, endMysql: mysqlEnd };
 }
 
+// --- ensureUser: trova o crea l'utente e ritorna id --------------------------
+// Richiede UNIQUE su users.email e/o users.phone (migrazioni 010+).
+// Nota: se non hai bisogno di login, assicurati che password_hash sia NULLABLE.
+async function ensureUser({ first, last, email, phone }) {
+  const e = trimOrNull(email);
+  const p = trimOrNull(phone);
+
+  // 1) match rapido su email/phone se presenti
+  if (e) {
+    const r = await query('SELECT id FROM users WHERE email = ? LIMIT 1', [e]);
+    if (r.length) return r[0].id;
+  }
+  if (p) {
+    const r = await query('SELECT id FROM users WHERE phone = ? LIMIT 1', [p]);
+    if (r.length) return r[0].id;
+  }
+
+  // 2) upsert: se esiste (per unique key) aggiorna nomi e restituisce l'id
+  //    se non esiste, crea e restituisce l'id nuovo.
+  const res = await query(`
+    INSERT INTO users (first_name, last_name, email, phone)
+    VALUES (?, ?, ?, ?)
+    ON DUPLICATE KEY UPDATE
+      first_name = COALESCE(VALUES(first_name), first_name),
+      last_name  = COALESCE(VALUES(last_name),  last_name),
+      id = LAST_INSERT_ID(id)
+  `, [trimOrNull(first), trimOrNull(last), e, p]);
+
+  // mysql2 OkPacket: insertId è disponibile sia per insert che per dup-key
+  return res.insertId || res[0]?.insertId;
+}
+
 // --- API principali ----------------------------------------------------------
 
 // LIST con filtri
@@ -47,25 +83,43 @@ async function list(filter = {}) {
 
   if (filter.q) {
     const q = `%${String(filter.q).trim()}%`;
-    where.push('(r.customer_first LIKE ? OR r.customer_last LIKE ? OR r.phone LIKE ? OR r.email LIKE ?)');
-    params.push(q, q, q, q);
+    where.push(`(
+      u.first_name  LIKE ? OR u.last_name LIKE ? OR u.email LIKE ? OR u.phone LIKE ?
+      OR r.customer_first LIKE ? OR r.customer_last LIKE ? OR r.email LIKE ? OR r.phone LIKE ?
+    )`);
+    params.push(q, q, q, q, q, q, q, q);
   }
 
-  // === INIZIO MODIFICA (evita placeholder fantasma) ==========================
-  // Problema: il driver può contare il '?' dentro le stringhe come placeholder.
-  // Soluzione: non usare '?' letterale; usa CHAR(63) e CAST per table_number.
   const sql = `
     SELECT
       r.*,
-      CONCAT('Tavolo ', IFNULL(CAST(t.table_number AS CHAR), CHAR(63))) AS table_name,
+
+      -- Dati tavolo
       t.table_number AS table_number,
-      t.room_id      AS room_id
+      t.room_id      AS room_id,
+      CONCAT('Tavolo ', IFNULL(CAST(t.table_number AS CHAR), CHAR(63))) AS table_name,
+
+      -- Dati utente (prefisso u_)
+      u.id          AS u_id,
+      u.first_name  AS u_first_name,
+      u.last_name   AS u_last_name,
+      u.email       AS u_email,
+      u.phone       AS u_phone,
+
+      -- Campi utili per il FE
+      TRIM(CONCAT_WS(' ',
+        COALESCE(NULLIF(u.first_name,''), NULLIF(r.customer_first,'')),
+        COALESCE(NULLIF(u.last_name,''),  NULLIF(r.customer_last,''))
+      )) AS display_name,
+
+      COALESCE(NULLIF(u.phone,''),  NULLIF(r.phone,''))  AS contact_phone,
+      COALESCE(NULLIF(u.email,''),  NULLIF(r.email,''))  AS contact_email
     FROM reservations r
+    LEFT JOIN users  u ON u.id = r.user_id
     LEFT JOIN tables t ON t.id = r.table_id
     WHERE ${where.join(' AND ')}
     ORDER BY r.start_at DESC, r.id DESC
   `;
-  // === FINE MODIFICA =========================================================
 
   logger.info('📥 RESV list ▶️', { where, params, service: 'server' });
   return await query(sql, params);
@@ -73,25 +127,38 @@ async function list(filter = {}) {
 
 // DETTAGLIO
 async function getById(id) {
-  // === INIZIO MODIFICA (come sopra: niente '?' letterale) ====================
   const sql = `
     SELECT
       r.*,
-      CONCAT('Tavolo ', IFNULL(CAST(t.table_number AS CHAR), CHAR(63))) AS table_name,
+
       t.table_number AS table_number,
-      t.room_id      AS room_id
+      t.room_id      AS room_id,
+      CONCAT('Tavolo ', IFNULL(CAST(t.table_number AS CHAR), CHAR(63))) AS table_name,
+
+      u.id          AS u_id,
+      u.first_name  AS u_first_name,
+      u.last_name   AS u_last_name,
+      u.email       AS u_email,
+      u.phone       AS u_phone,
+
+      TRIM(CONCAT_WS(' ',
+        COALESCE(NULLIF(u.first_name,''), NULLIF(r.customer_first,'')),
+        COALESCE(NULLIF(u.last_name,''),  NULLIF(r.customer_last,''))
+      )) AS display_name,
+
+      COALESCE(NULLIF(u.phone,''),  NULLIF(r.phone,''))  AS contact_phone,
+      COALESCE(NULLIF(u.email,''),  NULLIF(r.email,''))  AS contact_email
     FROM reservations r
+    LEFT JOIN users  u ON u.id = r.user_id
     LEFT JOIN tables t ON t.id = r.table_id
     WHERE r.id = ?
     LIMIT 1
   `;
-  // === FINE MODIFICA =========================================================
-
   const rows = await query(sql, [id]);
   return rows[0] || null;
 }
 
-// CREA prenotazione (calcola end_at se assente)
+// CREA prenotazione (calcola end_at se assente) + associa a users
 async function create(dto) {
   const {
     customer_first = null,
@@ -110,25 +177,46 @@ async function create(dto) {
     throw new Error('party_size e start_at sono obbligatori');
   }
 
+  // 1) risolvi/crea utente e prendi user_id
+  const userId = await ensureUser({
+    first: customer_first,
+    last : customer_last,
+    email,
+    phone,
+  });
+
+  // 2) calcola orari MySQL (o usa end_at se passato)
   const times = computeEndAtFromStart(start_at);
   const startMysql = times.startMysql;
   const endMysql   = end_at ? end_at : times.endMysql;
 
+  // 3) INSERT con user_id (manteniamo anche i legacy per compatibilità)
   const sql = `
     INSERT INTO reservations
-      (customer_first, customer_last, phone, email, party_size,
+      (user_id, customer_first, customer_last, phone, email, party_size,
        start_at, end_at, notes, status, client_token, table_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
   `;
 
   const params = [
-    customer_first, customer_last, phone, email, party_size,
-    startMysql, endMysql, notes, client_token, table_id
+    userId,
+    trimOrNull(customer_first),
+    trimOrNull(customer_last),
+    trimOrNull(phone),
+    trimOrNull(email),
+    Number(party_size) || 1,
+    startMysql,
+    endMysql,
+    trimOrNull(notes),
+    client_token,
+    table_id || null
   ];
 
   const res = await query(sql, params);
-  const created = await getById(res.insertId);
-  logger.info('✅ RESV create', { id: res.insertId, service: 'server' });
+  const id = res.insertId || res[0]?.insertId;
+
+  const created = await getById(id);
+  logger.info('✅ RESV create', { id, user_id: userId, service: 'server' });
   return created;
 }
 
@@ -142,7 +230,6 @@ async function listRooms() {
 
 // TABLES (supporto UI)
 async function listTablesByRoom(roomId) {
-  // NOTA: niente “label” nel DB reale: esponiamo table_number e seats come capacity
   return await query(
     'SELECT id, room_id, table_number, seats AS capacity, status FROM tables WHERE room_id = ? ORDER BY table_number ASC, id ASC',
     [roomId]

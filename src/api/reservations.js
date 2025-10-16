@@ -10,6 +10,51 @@ const router = express.Router();
 const logger = require('../logger');
 const svc = require('../services/reservations.service'); // <-- usa il service vero
 
+
+// utils piccoli
+function trimOrNull(s) {
+  const v = (s ?? '').toString().trim();
+  return v ? v : null;
+}
+
+/**
+ * ensureUser: trova o crea un utente e ritorna l'ID.
+ * Strategia:
+ *  - match per email (se presente)
+ *  - altrimenti match per telefono (se presente)
+ *  - altrimenti crea record con i campi disponibili
+ */
+async function ensureUser(conn, { first, last, email, phone }) {
+  const emailT = trimOrNull(email);
+  const phoneT = trimOrNull(phone);
+
+  // 1) match per email
+  if (emailT) {
+    const [r1] = await conn.execute(
+      'SELECT id FROM `users` WHERE email = ? LIMIT 1',
+      [emailT]
+    );
+    if (r1.length) return r1[0].id;
+  }
+
+  // 2) match per telefono
+  if (phoneT) {
+    const [r2] = await conn.execute(
+      'SELECT id FROM `users` WHERE phone = ? LIMIT 1',
+      [phoneT]
+    );
+    if (r2.length) return r2[0].id;
+  }
+
+  // 3) crea
+  const [ins] = await conn.execute(
+    'INSERT INTO `users` (first_name, last_name, email, phone) VALUES (?,?,?,?)',
+    [trimOrNull(first), trimOrNull(last), emailT, phoneT]
+  );
+  return ins.insertId;
+}
+
+
 // (in cima al file)
 // === INIZIO MODIFICA STEP 4 — import requireAuth + service azioni ===
 // const { requireAuth } = require('./auth'); // se già presente, ignora questa riga

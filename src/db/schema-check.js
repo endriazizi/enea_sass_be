@@ -17,46 +17,62 @@ const logger = require('../logger');
 const EXPECTED = {
   rooms: {
     // DB reale: id = BIGINT NOT NULL
-    id:         { data_type: 'bigint',   nullable: 'NO'  },
-    name:       { data_type: 'varchar',  nullable: 'NO'  },
-    is_active:  { data_type: 'tinyint',  nullable: 'YES' },
+    id: { data_type: 'bigint', nullable: 'NO' },
+    name: { data_type: 'varchar', nullable: 'NO' },
+    is_active: { data_type: 'tinyint', nullable: 'YES' },
     // DB reale: sort_order = int NOT NULL
-    sort_order: { data_type: 'int',      nullable: 'NO'  },
+    sort_order: { data_type: 'int', nullable: 'NO' },
     // DB reale: created_at = timestamp NOT NULL
-    created_at: { data_type: 'timestamp',nullable: 'NO'  },
+    created_at: { data_type: 'timestamp', nullable: 'NO' },
   },
 
   tables: {
-    id:           { data_type: 'int',      nullable: 'NO'  },
+    id: { data_type: 'int', nullable: 'NO' },
     // Abbiamo normalizzato: room_id = BIGINT per matchare rooms.id, NULLABLE
-    room_id:      { data_type: 'bigint',   nullable: 'YES' },
+    room_id: { data_type: 'bigint', nullable: 'YES' },
     // DB reale: table_number = int NOT NULL
-    table_number: { data_type: 'int',      nullable: 'NO'  },
-    seats:        { data_type: 'int',      nullable: 'YES' },
-    status:       { data_type: 'enum',     nullable: 'YES',
-                    column_type: "enum('free','reserved','occupied')" },
+    table_number: { data_type: 'int', nullable: 'NO' },
+    seats: { data_type: 'int', nullable: 'YES' },
+    status: {
+      data_type: 'enum', nullable: 'YES',
+      column_type: "enum('free','reserved','occupied')"
+    },
     // DB reale: updated_at = timestamp NOT NULL
-    updated_at:   { data_type: 'timestamp',nullable: 'NO'  },
+    updated_at: { data_type: 'timestamp', nullable: 'NO' },
   },
 
+  users: {
+  id:         { data_type: 'bigint',   nullable: 'NO'  },
+  first_name: { data_type: 'varchar',  nullable: 'YES' },
+  last_name:  { data_type: 'varchar',  nullable: 'YES' },
+  email:      { data_type: 'varchar',  nullable: 'YES' },
+  phone:      { data_type: 'varchar',  nullable: 'YES' },
+  created_at: { data_type: 'timestamp',nullable: 'NO'  },
+  updated_at: { data_type: 'timestamp',nullable: 'YES' },
+},
+
   reservations: {
-    id:            { data_type: 'bigint',   nullable: 'NO'  },
-    customer_first:{ data_type: 'varchar',  nullable: 'YES' },
-    customer_last: { data_type: 'varchar',  nullable: 'YES' },
-    phone:         { data_type: 'varchar',  nullable: 'YES' },
-    email:         { data_type: 'varchar',  nullable: 'YES' },
-    party_size:    { data_type: 'int',      nullable: 'NO'  },
-    start_at:      { data_type: 'datetime', nullable: 'NO'  },
-    // DB reale: end_at = datetime NOT NULL
-    end_at:        { data_type: 'datetime', nullable: 'NO'  },
-    notes:         { data_type: 'varchar',  nullable: 'YES' },
-    status:        { data_type: 'enum',     nullable: 'YES',
-                     column_type: "enum('pending','accepted','rejected','cancelled')" },
-    client_token:  { data_type: 'varchar',  nullable: 'YES' },
-    table_id:      { data_type: 'int',      nullable: 'YES' },
-    // DB reale: created_at = timestamp NOT NULL
-    created_at:    { data_type: 'timestamp',nullable: 'NO'  },
+    id: { data_type: 'bigint', nullable: 'NO' },
+    customer_first: { data_type: 'varchar', nullable: 'YES' },
+    customer_last: { data_type: 'varchar', nullable: 'YES' },
+    phone: { data_type: 'varchar', nullable: 'YES' },
+    email: { data_type: 'varchar', nullable: 'YES' },
+    user_id: { data_type: 'bigint', nullable: 'YES' }, // 👈 aggiungi
+    party_size: { data_type: 'int', nullable: 'NO' },
+    start_at: { data_type: 'datetime', nullable: 'NO' },
+    end_at: { data_type: 'datetime', nullable: 'NO' },
+    notes: { data_type: 'varchar', nullable: 'YES' },
+    status: {
+      data_type: 'enum', nullable: 'YES',
+      column_type: "enum('pending','accepted','rejected','cancelled')"
+    },
+    status_note: { data_type: 'text', nullable: 'YES' }, // 👈 aggiungi
+    status_changed_at: { data_type: 'timestamp', nullable: 'YES' }, // 👈 aggiungi
+    client_token: { data_type: 'varchar', nullable: 'YES' },
+    table_id: { data_type: 'int', nullable: 'YES' },
+    created_at: { data_type: 'timestamp', nullable: 'NO' },
   }
+
 };
 
 async function fetchColumns(table) {
@@ -79,9 +95,9 @@ async function fetchColumns(table) {
   for (const r of rows) {
     map[String(r.name).toLowerCase()] = {
       data_type: String(r.data_type).toLowerCase(),
-      nullable : String(r.nullable).toUpperCase(),
+      nullable: String(r.nullable).toUpperCase(),
       column_type: r.column_type ? String(r.column_type).toLowerCase() : null,
-      column_key : r.column_key || '',
+      column_key: r.column_key || '',
       pos: r.pos
     };
   }
@@ -108,7 +124,7 @@ function diffTable(_table, got, exp) {
     const e = exp[k];
     const mismatch = [];
     if (e.data_type && g.data_type !== e.data_type) mismatch.push(`type: ${g.data_type} ≠ ${e.data_type}`);
-    if (e.nullable  && g.nullable  !== e.nullable)  mismatch.push(`null: ${g.nullable} ≠ ${e.nullable}`);
+    if (e.nullable && g.nullable !== e.nullable) mismatch.push(`null: ${g.nullable} ≠ ${e.nullable}`);
     if (e.column_type && g.column_type !== e.column_type) mismatch.push(`column_type: ${g.column_type} ≠ ${e.column_type}`);
     if (mismatch.length) diffs.typeMismatch.push({ column: k, details: mismatch.join(', ') });
   });

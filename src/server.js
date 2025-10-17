@@ -61,6 +61,10 @@ if (ensureExists('api/rooms', 'API /api/rooms')) {
   app.use('/api/rooms', require('./api/rooms'));
 }
 
+
+// === INIZIO MODIFICA (mount printer routes) ===
+app.use('/api', require('./api/printer'));
+// === FINE MODIFICA ===
 // app.get('/health', (_req, res) => res.json({ ok: true, time: Date.nnpmow() }));
 
 // Health

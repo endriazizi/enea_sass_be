@@ -10,6 +10,24 @@ const router = express.Router();
 const logger = require('../logger');
 const svc = require('../services/reservations.service'); // <-- usa il service vero
 
+// === INIZIO MODIFICA — requireAuth PRIMA delle rotte =========================
+// Se ./auth esporta requireAuth lo usiamo; altrimenti creiamo un fallback DEV.
+// Così evitiamo: ReferenceError: requireAuth is not defined
+let requireAuth;
+try {
+  ({ requireAuth } = require('./auth')); // ./auth deve esportare { requireAuth }
+  if (typeof requireAuth !== 'function') throw new Error('requireAuth non è una funzione');
+  logger.info('🔐 requireAuth caricato da ./auth');
+} catch (e) {
+  logger.warn('⚠️ requireAuth non disponibile da ./auth. Uso FALLBACK DEV (solo per test locali).');
+  requireAuth = (req, _res, next) => {
+    // ⚠️ DEV ONLY: utente finto per testare le rotte protette senza JWT reale
+    req.user = { id: 0, email: 'dev@local' };
+    next();
+  };
+}
+// === FINE MODIFICA ===========================================================
+
 
 // utils piccoli
 function trimOrNull(s) {
@@ -56,26 +74,9 @@ async function ensureUser(conn, { first, last, email, phone }) {
 
 
 // (in cima al file)
-// === INIZIO MODIFICA STEP 4 — import requireAuth + service azioni ===
-// const { requireAuth } = require('./auth'); // se già presente, ignora questa riga
+// === INIZIO MODIFICA STEP 4 — import service azioni ===
 const resvActions = require('../services/reservations-status.service');
 // === FINE MODIFICA STEP 4 ===
-
-// === INIZIO MODIFICA STEP 4 — requireAuth con fallback DEV ===================
-// Se ./auth esporta requireAuth lo usiamo; altrimenti creiamo un fallback DEV
-let requireAuth;
-try {
-  ({ requireAuth } = require('./auth'));
-  if (typeof requireAuth !== 'function') throw new Error('requireAuth non è una funzione');
-} catch (e) {
-  logger.warn('⚠️ requireAuth non disponibile da ./auth. Uso FALLBACK DEV (solo per test locali).');
-  requireAuth = (req, _res, next) => {
-    // ⚠️ DEV ONLY: utente finto per testare le rotte protette senza JWT reale
-    req.user = { id: 0, email: 'dev@local' };
-    next();
-  };
-}
-// === FINE MODIFICA STEP 4 — requireAuth con fallback DEV =====================
 
 
 // GET /api/reservations?status=&from=YYYY-MM-DD&to=YYYY-MM-DD
@@ -164,18 +165,18 @@ router.put('/:id(\\d+)/status', requireAuth, async (req, res) => {
     });
 
     return res.json({ ok: true, reservation: updated });
-  }   catch (err) {
-  const code = err.statusCode || 500;
-  // 🔎 log verboso
-  logger.error('❌ [RESV] status change failed', {
-    message: err.message,
-    sql: err.sql,
-    sqlMessage: err.sqlMessage,
-    stack: err.stack,
-  });
-  // 🔎 manda al FE il dettaglio SQL se presente (aiuta il debug)
-  return res.status(code).json({ error: err.sqlMessage || err.message });
-}
+  } catch (err) {
+    const code = err.statusCode || 500;
+    // 🔎 log verboso
+    logger.error('❌ [RESV] status change failed', {
+      message: err.message,
+      sql: err.sql,
+      sqlMessage: err.sqlMessage,
+      stack: err.stack,
+    });
+    // 🔎 manda al FE il dettaglio SQL se presente (aiuta il debug)
+    return res.status(code).json({ error: err.sqlMessage || err.message });
+  }
 });
 // === FINE MODIFICA STEP 4 ===
 
@@ -243,6 +244,9 @@ router.post('/print/daily', requireAuth, async (req, res) => {
 
     // prendi dati dal service che già usi in FE
     const rows = await svc.list({ from: date, to: date, status });
+    // === INIZIO MODIFICA (log diagnostico leggero) ===
+    logger.info('🧾 [PRINT] daily payload ready', { date, status, rows: rows.length });
+    // === FINE MODIFICA ===
 
     const out = await printerSvc.printDailyReservations({
       date,
@@ -257,7 +261,6 @@ router.post('/print/daily', requireAuth, async (req, res) => {
 });
 
 
-
 // === STAMPA SEGNAPOSTI (uno scontrino per prenotazione) ======================
 router.post('/print/placecards', requireAuth, async (req, res) => {
   try {
@@ -267,6 +270,9 @@ router.post('/print/placecards', requireAuth, async (req, res) => {
 
     // prendi prenotazioni del giorno
     const rows = await svc.list({ from: date, to: date, status });
+    // === INIZIO MODIFICA (log diagnostico leggero) ===
+    logger.info('🧾 [PRINT] placecards payload ready', { date, status, rows: rows.length });
+    // === FINE MODIFICA ===
 
     const out = await printerSvc.printPlaceCards({
       date,

@@ -1,23 +1,28 @@
+// src/services/thermal-printer.service.js
 'use strict';
 
-// === INIZIO MODIFICA (allineamento ENV + log) =================================
+// ============================================================================
 // Service di stampa “daily” e “placecards” che invia ESC/POS su TCP 9100.
-// 🔧 FIX: usa PRINTER_IP (preferito) con fallback PRINTER_HOST (legacy).
-// 🔎 Aggiunti log dettagliati su host/port/cols/codepage e conteggi.
-// ==============================================================================
+// ✅ Patch: forziamo la formattazione ORE/DATA nel fuso indicato da BIZ_TZ
+//    (default 'Europe/Rome'), così il risultato è corretto anche se il server
+//    gira in un altro timezone.
+// ============================================================================
 
 const net = require('net');
 const iconv = require('iconv-lite');
 const logger = require('../logger');
 
-// 🧠 Preferiamo PRINTER_IP; se assente, usiamo PRINTER_HOST per retro-compat
+// ── Config da ENV ────────────────────────────────────────────────────────────
 const RESOLVED_HOST = process.env.PRINTER_IP || process.env.PRINTER_HOST || '127.0.0.1';
 const RESOLVED_PORT = Number(process.env.PRINTER_PORT || 9100);
 const WIDTH_MM      = Number(process.env.PRINTER_WIDTH_MM || 80);
 const CODEPAGE      = (process.env.PRINTER_CODEPAGE || 'cp858').toLowerCase();
+// 👉 Fuso per la resa su carta (non dipende dal fuso del server)
+const DISPLAY_TZ    = process.env.BIZ_TZ || 'Europe/Rome';
+
 const COLS          = WIDTH_MM >= 70 ? 48 : 32; // 58mm≈32 col, 80mm≈48 col
 
-// ESC/POS helpers --------------------------------------------------------------
+// ── ESC/POS helpers ─────────────────────────────────────────────────────────
 const ESC = Buffer.from([0x1B]);
 const GS  = Buffer.from([0x1D]);
 const LF  = Buffer.from([0x0A]);
@@ -32,7 +37,7 @@ const DOUBLE_ON    = Buffer.concat([GS,  Buffer.from('!'), Buffer.from([0x11])])
 const DOUBLE_OFF   = Buffer.concat([GS,  Buffer.from('!'), Buffer.from([0x00])]);
 const CUT_FULL     = Buffer.concat([GS,  Buffer.from('V'), Buffer.from([0])]);    // taglio
 
-// selezione tabella caratteri (euro, italiano)
+// Selezione tabella caratteri (euro, italiano)
 function selectCodepageBuffer() {
   // ESC t n — mappa comune (può variare per modello)
   const map = { cp437:0, cp850:2, cp858:19, cp852:18, cp1252:16 };
@@ -77,25 +82,54 @@ function sendToPrinter(buffers) {
   });
 }
 
-// utils di formattazione -------------------------------------------------------
-function formatTimeHHmm(start_at) {
-  // DB manda "YYYY-MM-DD HH:mm:ss" (UTC) → leggiamola come UTC
-  const s = String(start_at || '');
-  const d = s.includes('T') ? new Date(s) : new Date(s.replace(' ', 'T') + 'Z');
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  return `${hh}:${mm}`;
+// ── Utils data/ora (timezone-safe) ──────────────────────────────────────────
+// DB invia start_at come UTC (es. "YYYY-MM-DD HH:mm:ss"): parse come UTC
+function parseDbDateUTC(s) {
+  const str = String(s || '');
+  // se è "YYYY-MM-DD HH:mm:ss" → aggiungo 'Z' per forzare UTC, altrimenti new Date ISO
+  return str.includes('T') ? new Date(str) : new Date(str.replace(' ', 'T') + 'Z');
 }
+
+// Orario HH:mm reso nel fuso DISPLAY_TZ
+function formatTimeHHmm(start_at) {
+  const d = parseDbDateUTC(start_at);
+  return new Intl.DateTimeFormat('it-IT', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: DISPLAY_TZ,
+  }).format(d);
+}
+
+// Data “umana” da un oggetto Date (mostrata in DISPLAY_TZ)
+function formatDateHuman(d) {
+  return new Intl.DateTimeFormat('it-IT', {
+    weekday: 'long',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    timeZone: DISPLAY_TZ,
+  }).format(d);
+}
+
+// Data “umana” da Y-M-D string (es. intestazione daily)
+function formatYmdHuman(ymd) {
+  // Creo una data a mezzanotte UTC e la rendo nel fuso desiderato
+  const d = new Date(String(ymd || '').trim() + 'T00:00:00Z');
+  return formatDateHuman(d);
+}
+
 function up(s) { return (s || '').toString().toUpperCase(); }
 
-// === DAILY ===================================================================
+// ── DAILY ───────────────────────────────────────────────────────────────────
 /**
  * Stampa UN unico scontrino con il riepilogo prenotazioni del giorno.
  * rows: array prenotazioni { start_at, table_number, table_id, party_size, customer_first, customer_last, phone, notes, ... }
  */
 async function printDailyReservations({ date, rows, user }) {
   logger.info('🖨️ DAILY begin', {
-    date, rows: rows?.length || 0, host: RESOLVED_HOST, port: RESOLVED_PORT, cols: COLS, codepage: CODEPAGE
+    date, rows: rows?.length || 0, host: RESOLVED_HOST, port: RESOLVED_PORT,
+    cols: COLS, codepage: CODEPAGE, tz: DISPLAY_TZ
   });
 
   const out = [];
@@ -103,18 +137,21 @@ async function printDailyReservations({ date, rows, user }) {
   out.push(line('PRENOTAZIONI'));
   out.push(DOUBLE_OFF, BOLD_OFF);
 
-  const fmtDate = new Intl.DateTimeFormat('it-IT', {
-    weekday:'long', day:'2-digit', month:'2-digit', year:'numeric'
-  }).format(new Date(date + 'T00:00:00'));
-  out.push(line(fmtDate.toUpperCase()));
+  const header = formatYmdHuman(date).toUpperCase();
+  out.push(line(header));
   out.push(line('-'.repeat(COLS)));
 
   // intestazione
   out.push(ALIGN_LEFT, BOLD_ON);
-  out.push(line(padRight('ORA',5) + ' ' + padRight('TAV',4) + ' ' + padRight('PAX',3) + ' ' + padRight('NOME', COLS-5-1-4-1-3-1)));
+  out.push(line(
+    padRight('ORA',5) + ' ' +
+    padRight('TAV',4) + ' ' +
+    padRight('PAX',3) + ' ' +
+    padRight('NOME', COLS-5-1-4-1-3-1)
+  ));
   out.push(BOLD_OFF, line('-'.repeat(COLS)));
 
-  // ordiniamo per orario
+  // ordiniamo per orario (string compare su ISO/SQL va bene)
   rows.sort((a,b) => String(a.start_at).localeCompare(String(b.start_at)));
 
   for (const r of rows) {
@@ -139,7 +176,7 @@ async function printDailyReservations({ date, rows, user }) {
       for (const rr of notesRows) out.push(line(' '.repeat(left.length) + rr));
     }
 
-    // separatore
+    // separatore riga
     out.push(line(' '.repeat(COLS)));
   }
 
@@ -151,7 +188,7 @@ async function printDailyReservations({ date, rows, user }) {
   return { jobId: `daily_${Date.now()}`, printedCount: rows.length };
 }
 
-// === PLACE CARDS =============================================================
+// ── PLACE CARDS ──────────────────────────────────────────────────────────────
 // ESC/POS QR commands (Model 2)
 function qrStoreData(data) {
   const payload = encode(data);
@@ -175,18 +212,15 @@ function qrPrint() {
   return Buffer.concat([GS, Buffer.from('('), Buffer.from('k'), Buffer.from([0x03,0x00,0x31,0x51,0x30])]);
 }
 
-function formatDateHuman(d) {
-  return new Intl.DateTimeFormat('it-IT', { weekday:'long', day:'2-digit', month:'2-digit', year:'numeric' }).format(d);
-}
-
 function buildOnePlaceCardBuffers(r, opts = {}) {
-  const cols = WIDTH_MM >= 70 ? 48 : 32;
   const out = [];
 
   const time = formatTimeHHmm(r.start_at);
-  const d = String(r.start_at || '');
-  const dateObj = d.includes('T') ? new Date(d) : new Date(d.replace(' ', 'T') + 'Z');
+
+  const dStr = String(r.start_at || '');
+  const dateObj = parseDbDateUTC(dStr);
   const dateHuman = formatDateHuman(dateObj);
+
   const tav  = (r.table_number || r.table_id || '-').toString();
   const pax  = (r.party_size || '-').toString();
   const sala = r.room_name || r.room || r.room_id || '-';
@@ -219,7 +253,8 @@ function buildOnePlaceCardBuffers(r, opts = {}) {
 
 async function printPlaceCards({ date, rows, user, logoText, qrBaseUrl }) {
   logger.info('🖨️ PLACECARDS begin', {
-    date, rows: rows?.length || 0, host: RESOLVED_HOST, port: RESOLVED_PORT, cols: COLS, codepage: CODEPAGE
+    date, rows: rows?.length || 0, host: RESOLVED_HOST, port: RESOLVED_PORT,
+    cols: COLS, codepage: CODEPAGE, tz: DISPLAY_TZ
   });
 
   const buffers = [];
@@ -233,5 +268,3 @@ module.exports = {
   printDailyReservations,
   printPlaceCards,
 };
-
-// === FINE MODIFICA ===========================================================

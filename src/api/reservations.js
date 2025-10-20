@@ -1,14 +1,11 @@
 // src/api/reservations.js
-// Router REST per Prenotazioni — usa il service interno.
-// Stile: commenti lunghi, log a emoji, errori espliciti.
-
 'use strict';
 
 const express = require('express');
 const router = express.Router();
 
 const logger = require('../logger');
-const svc = require('../services/reservations.service'); // <-- usa il service vero
+const svc = require('../services/reservations.service');
 
 // === requireAuth con fallback DEV ============================================
 let requireAuth;
@@ -24,10 +21,10 @@ try {
   };
 }
 
-// Azioni di stato + audit (già usate in FE)
+// Azioni di stato + audit
 const resvActions = require('../services/reservations-status.service');
 
-// GET /api/reservations?status=&from=YYYY-MM-DD&to=YYYY-MM-DD&q=
+// GET /api/reservations?status=&from=&to=&q=
 router.get('/', async (req, res) => {
   try {
     const filter = {
@@ -45,7 +42,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-// ---------- Supporto UI (messi prima di /:id per evitare conflitti) ----------
+// ---------- Supporto UI (prima di /:id per evitare ambiguità) ---------------
 
 // Sale
 router.get('/rooms', async (_req, res) => {
@@ -82,7 +79,6 @@ router.get('/support/count-by-status', async (req, res) => {
 
 // ============================ AZIONI DI STATO ================================
 
-// PUT /:id/status
 router.put('/:id(\\d+)/status', requireAuth, async (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -120,7 +116,6 @@ router.get('/:id(\\d+)/audit', requireAuth, async (req, res) => {
 
 // ================================ CRUD ======================================
 
-// GET /:id
 router.get('/:id(\\d+)', async (req, res) => {
   const id = Number(req.params.id);
   if (!Number.isFinite(id)) return res.status(400).json({ error: 'invalid_id' });
@@ -134,7 +129,6 @@ router.get('/:id(\\d+)', async (req, res) => {
   }
 });
 
-// POST /
 router.post('/', async (req, res) => {
   try {
     const created = await svc.create(req.body || {});
@@ -145,7 +139,6 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PATCH /:id
 router.patch('/:id(\\d+)', requireAuth, async (req, res) => {
   try {
     const updated = await svc.update(Number(req.params.id), req.body || {});
@@ -157,7 +150,6 @@ router.patch('/:id(\\d+)', requireAuth, async (req, res) => {
   }
 });
 
-// DELETE /:id
 router.delete('/:id(\\d+)', requireAuth, async (req, res) => {
   try {
     await svc.remove(Number(req.params.id));
@@ -205,5 +197,33 @@ router.post('/print/placecards', requireAuth, async (req, res) => {
     return res.status(500).json({ error: err.message || String(err) });
   }
 });
+
+// === INIZIO MODIFICA: stampa segnaposto singolo =============================
+// POST /api/reservations/:id/print/placecard
+router.post('/:id(\\d+)/print/placecard', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: 'invalid_id' });
+
+    const r = await svc.getById(id);
+    if (!r) return res.status(404).json({ error: 'not_found' });
+
+    const qrBaseUrl = req.body?.qr_base_url || process.env.QR_BASE_URL || '';
+
+    const out = await printerSvc.printPlaceCards({
+      date: (r.start_at || '').toString().slice(0, 10),
+      rows: [r],                        // 👈 una sola prenotazione
+      user: req.user,
+      logoText: process.env.BIZ_NAME || 'LA MIA ATTIVITÀ',
+      qrBaseUrl,
+    });
+
+    return res.json({ ok: true, job_id: out.jobId, printed_count: out.printedCount });
+  } catch (err) {
+    logger.error('❌ print/placecard (single)', { error: String(err) });
+    return res.status(500).json({ error: err.message || String(err) });
+  }
+});
+// === FINE MODIFICA ===========================================================
 
 module.exports = router;
